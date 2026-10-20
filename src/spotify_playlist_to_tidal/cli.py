@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from collections.abc import Sequence
 from typing import NoReturn
@@ -21,7 +22,14 @@ from .auth import (
     tidal_session,
     validate_spotify_configuration,
 )
-from .transfer import TransferError, TransferResult, copy_playlist, spotify_playlist_id
+from .transfer import (
+    TransferError,
+    TransferResult,
+    copy_playlist,
+    copy_source_playlist,
+    read_web_playlist,
+    spotify_playlist_id,
+)
 
 _COMMAND = "spotify-playlist-to-tidal"
 
@@ -39,6 +47,16 @@ def _transfer_parser() -> argparse.ArgumentParser:
         "spotify_uri",
         metavar="SPOTIFY_URI",
         help="spotify:playlist:... URI or https://open.spotify.com/playlist/... URL",
+    )
+    parser.add_argument(
+        "--web-file",
+        metavar="PATH",
+        help="use a locally saved public Spotify web-extraction Markdown file",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="match tracks and report the planned copy without creating a TIDAL playlist",
     )
     parser.add_argument(
         "--public",
@@ -70,6 +88,32 @@ def _report(message: str) -> None:
 
 
 def _report_result(result: TransferResult) -> None:
+    if result.dry_run:
+        print(
+            json.dumps(
+                {
+                    "dry_run": True,
+                    "playlist_name": result.playlist_name,
+                    "public": result.public,
+                    "source_count": result.source_count,
+                    "matched_count": result.copied_count,
+                    "matched": [
+                        {"source_position": position, "tidal_id": tidal_id}
+                        for position, tidal_id in result.matched
+                    ],
+                    "skipped": [
+                        {
+                            "source_position": skipped.position,
+                            "label": skipped.label,
+                            "reason": skipped.reason,
+                        }
+                        for skipped in result.skipped
+                    ],
+                },
+                sort_keys=True,
+            )
+        )
+        return
     if result.skipped:
         _report(f"Skipped {len(result.skipped)} track(s):")
         for skipped in result.skipped:
@@ -151,11 +195,29 @@ def _run_transfer(arguments: Sequence[str]) -> int:
         parser.error(str(error))
 
     try:
-        validate_spotify_configuration()
-        state_path = state_directory()
-        spotify = spotify_session(state_path)
-        tidal = tidal_session(state_path)
-        result = copy_playlist(args.spotify_uri, spotify, tidal, report=_report, public=args.public)
+        if args.web_file:
+            source = read_web_playlist(args.web_file, args.spotify_uri)
+            tidal = tidal_session(state_directory())
+            result = copy_source_playlist(
+                source,
+                tidal,
+                report=_report,
+                public=args.public,
+                dry_run=args.dry_run,
+            )
+        else:
+            validate_spotify_configuration()
+            state_path = state_directory()
+            spotify = spotify_session(state_path)
+            tidal = tidal_session(state_path)
+            result = copy_playlist(
+                args.spotify_uri,
+                spotify,
+                tidal,
+                report=_report,
+                public=args.public,
+                dry_run=args.dry_run,
+            )
     except (
         AuthenticationError,
         ConfigurationError,
@@ -168,7 +230,8 @@ def _run_transfer(arguments: Sequence[str]) -> int:
         return 1
 
     _report_result(result)
-    print(result.tidal_uri, flush=True)
+    if not result.dry_run:
+        print(result.tidal_uri, flush=True)
     return 0
 
 
